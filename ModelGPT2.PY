@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -84,7 +85,7 @@ class GPT(nn.Module):
 
     def forward(self, idx):
         B, T = idx.size()
-        assert T <=self.config.block_size, f"Cannot forward sequence of length {T}
+        assert T <=self.config.block_size, f"Cannot forward sequence of length {T}"
 
         pos = torch.arrange(0, T, dtype=torch.long, device=idx.device)
         pos_emb = self.transformer.wpe(pos)
