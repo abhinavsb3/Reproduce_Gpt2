@@ -146,5 +146,5 @@ class GPT(nn.Module):
     
     #________________________________________
     
-    model = GPT.from_pretrained('gpt2')
-    print("Model up!! didn't crashed!!")
+model = GPT.from_pretrained('gpt2')
+print("Model up!! didn't crashed!!Yaaay")
