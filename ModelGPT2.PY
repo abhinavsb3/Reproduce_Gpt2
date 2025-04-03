@@ -3,6 +3,7 @@ import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import tiktoken
 
 class CasualSelfAttention(nn.Module):
 
@@ -59,6 +60,7 @@ class Block(nn.Module):
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
+        return x
 
 
 @dataclass
@@ -83,7 +85,7 @@ class GPT(nn.Module):
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
-    def forward(self, idx):
+    def forward(self, idx, targets=None):
         B, T = idx.size()
         assert T <=self.config.block_size, f"Cannot forward sequence of length {T}"
 
@@ -96,8 +98,12 @@ class GPT(nn.Module):
             x = block(x)
 
         x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
-        return logits
+        logits = self.lm_head(x) #(B, T, vocab_size)
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        
+        return logits, loss
     
     @classmethod
     def from_pretrained(cls, model_type):
@@ -145,6 +151,69 @@ class GPT(nn.Module):
         return model
     
     #________________________________________
-    
-model = GPT.from_pretrained('gpt2')
-print("Model up!! didn't crashed!!Yaaay")
+device = 'cpu'
+if torch.cuda.is_available():
+    device = 'cuda'
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device = "mps"  #for mac users use apple silicon cpu which allready have gpu.mps is backend for apple silicon
+print(f"Using devices: {device}")
+device = "cpu" #OVERRIDE
+
+#get a data batch
+enc = tiktoken.get_encoding('gpt2')
+with open('input.txt', "r") as f:
+    text = f.read()
+text = text[:1000]
+tokens = enc.encode(text)
+B, T  = 4, 32
+buf = torch.tensor(tokens[:B*T + 1])
+x = buf[:-1].view(B, T)
+y = buf[1:].view(B, T)
+
+#get logits
+model = GPT(GPTConfig())
+model.to(device)
+logits, loss = model(x, y)
+print("Loss:",loss)
+import sys; sys.exit(0)
+
+# num_return_sequences = 5
+# max_length = 30  
+
+
+# #model = GPT.from_pretrained('gpt2')
+# model = GPT(GPTConfig())
+# print("Model up!! didn't crashed!!Yaaay")
+# model.eval()
+# model.to(device)
+
+# #prefix tokens
+# enc = tiktoken.get_encoding('gpt2')
+# tokens = enc.encode("Hello, I'm a langauge model")
+# tokens = torch.tensor(tokens, dtype=torch.long)
+# tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+# x = tokens.to(device)
+# print(x)
+
+# torch.manual_seed(42)
+# torch.cuda.manual_seed(42)
+
+# while x.size(1) < max_length:
+#     with torch.no_grad():
+#         logits = model(x) #(B, T, vocab_size)
+#         #taking logits only in the last position
+#         logits = logits[:,-1,:] #(B, vocab_size)
+#         probs = F.softmax(logits, dim=1)
+#         # do top-k sampling of 50 (huggingface pipeline default)
+#         # topk_probs here becomes (5, 50), topk_indices is (5, 50)
+#         topk_probs, topk_indices = torch.topk(probs, 50, dim=1)
+#         ix = torch.multinomial(topk_probs, 1) # (B, 1)
+#         xcol = torch.gather(topk_indices, -1, ix) # (B, 1)
+#         #now append the token to sequence
+#         x = torch.cat((x, xcol), dim=1)
+
+# #To print generated texts
+# for i in range(num_return_sequences):
+#     tokens = x[i,:max_length].tolist()
+#     decoded = enc.decode(tokens)
+#     print(">>>", decoded)
