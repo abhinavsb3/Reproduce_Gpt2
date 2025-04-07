@@ -27,10 +27,14 @@ class CasualSelfAttention(nn.Module):
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1,2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1,2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1,2) # (B, nh, T, hs)
-        att = (q @ k.transpose(-2,-1)) * (1.0 / math.sqrt(k.size(-1)))
-        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        y = att @ v # (B,nh,T,T) x (B, nh, T, hs) -> (B,nh,T,hs)
+
+        # att = (q @ k.transpose(-2,-1)) * (1.0 / math.sqrt(k.size(-1)))
+        # att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        # att = F.softmax(att, dim=-1)
+        # y = att @ v # (B,nh,T,T) x (B, nh, T, hs) -> (B,nh,T,hs)
+
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True) #flash attention
+
         y = y.transpose(1,2).contiguous().view(B, T, C) # (B, T, C) basically the concat operation of differnt heads
         y = self.c_proj(y)
         return y
@@ -217,13 +221,15 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-train_loader = DataLoaderLite(B=16, T=1024)
+train_loader = DataLoaderLite(B=16, T=1024) #(4,32)/(16,1024)
 
 torch.set_float32_matmul_precision('high') #set fp32 precision.Set hifh so everything will be in tensor float 32(tf32)
 
 #get logits
 model = GPT(GPTConfig())
 model.to(device)
+# model = torch.compile(model, backend="eager")
+model = torch.compile(model) 
 
 #optimzer
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
@@ -240,7 +246,7 @@ for i in range(50):
     t1 = time.time()
     dt = (t1-t0)*1000 #time difference in millisecond
     tokens_per_sec = (train_loader.B * train_loader.T) / (t1-t0)
-    print(f"step:{i}, loss: {loss.item()}, dt: {dt:.2f}ms" )
+    print(f"step:{i}, loss: {loss.item()}, dt: {dt:.2f}ms, tokens per second: {tokens_per_sec}" )
 
 
 import sys; sys.exit(0)
