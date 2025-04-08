@@ -5,6 +5,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 import tiktoken
 import time
+import inspect
 
 
 class CasualSelfAttention(nn.Module):
@@ -175,6 +176,29 @@ class GPT(nn.Module):
         
         return model
     
+    def configure_optimizers(self, weight_decay, learning_rate, device_type):
+       #taking all candidate parameters that require grad
+        param_dict = {pn:p for pn, p in self.named_parameters()}
+        param_dict = {pn:p for pn, p in param_dict.items() if p.requires_grad}
+        #creating Optim groups that any parameters that 2D will be weight decayed, otherwise no.
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [{'params':decay_params, ' weight_decay': weight_decay},
+                       {'params':nodecay_params, 'weight_decay': 0.0}
+                       ]
+        num_decay_params = sum(p.numel() for p in decay_params)  
+        num_nodecay_params = sum(p.numel() for p in nodecay_params) 
+        
+        print(f"num decayed parameters tensors: {len(decay_params)}, with{num_decay_params}:parameters")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        # Create AdamW optimizer and use the fused version if it is available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == "cuda"    #Kernal fusion for optimizer calculations
+
+        print(f"using fused AdamW")
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9,0.95), eps=1e-8, fused=use_fused)
+        return optimizer   
+
 #Data loader
 class DataLoaderLite:
     def __init__(self, B, T):
@@ -226,14 +250,32 @@ train_loader = DataLoaderLite(B=16, T=1024) #(4,32)/(16,1024)
 torch.set_float32_matmul_precision('high') #set fp32 precision.Set hifh so everything will be in tensor float 32(tf32)
 
 #get logits
-model = GPT(GPTConfig())
+model = GPT(GPTConfig(vocab_size=58304)) #Changed vocab_size fro 50257 to 50304 for optimization and efficencysince it is a power of 2
 model.to(device)
 # model = torch.compile(model, backend="eager")
 model = torch.compile(model) 
 
+max_lr = 6e-4
+min_lr = max_lr * 0.1
+warmup_steps = 10
+max_steps = 50
+def get_lr(it):
+    # 1) linear warmup for warmup_iters steps
+    if it < warmup_steps:
+        return max_lr * (it+1) / warmup_steps
+    # 2) if it > lr_decay_iters, return min learning rate
+    if it > max_steps:
+        return min_lr
+    # 3) in between, use cosine decay down to min learning rate
+    decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
+    return min_lr + coeff * (max_lr - min_lr)
+
 #optimzer
-optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-for i in range(50):
+optimizer = model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device)
+
+for step in range(max_steps):
     t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
@@ -241,12 +283,17 @@ for i in range(50):
     with torch.autocast(device_type=device, dtype=torch.bfloat16): #using mixed precision
         logits, loss = model(x, y)
     loss.backward()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    #determine and set learning rate for this iteration
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
     optimizer.step()
     torch.cuda.synchronize() #it will make a que for next process till completing current process in gpu
     t1 = time.time()
     dt = (t1-t0)*1000 #time difference in millisecond
     tokens_per_sec = (train_loader.B * train_loader.T) / (t1-t0)
-    print(f"step:{i}, loss: {loss.item()}, dt: {dt:.2f}ms, tokens per second: {tokens_per_sec}" )
+    print(f"step:{step:4d} | loss: {loss.item()} | lr: {lr:.4e} |  norm:{norm:.4f} | dt: {dt:.2f}ms | tokens per second: {tokens_per_sec} | " )
 
 
 import sys; sys.exit(0)
