@@ -9,6 +9,7 @@ import time
 import inspect
 import numpy as np
 import sys
+from hellaswag import render_example,iterate_examples, get_most_likely_row
 
 
 class CasualSelfAttention(nn.Module):
@@ -252,8 +253,8 @@ class DataLoaderLite:
         return x, y
 
 
-    
-    #________________________________________
+
+    #_________________________________________________________
 
 #Setting up DDP
 #torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
@@ -336,6 +337,15 @@ def get_lr(it):
 #optimzer
 optimizer = raw_model.configure_optimizers(weight_decay=0.1, learning_rate=6e-4, device_type=device_type)
 
+
+#creating the log directory.Will write checkpoints to and log to
+log_dir = "log"
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, f"log.txt")
+with open(log_file, "w") as f: # open for writing to clear the file
+    pass
+
+
 for step in range(max_steps):
     t0 = time.time()
 
@@ -358,7 +368,43 @@ for step in range(max_steps):
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
 
-    if step  > 0 and step % 100 == 0 and False:
+
+    #Evaluating Hellaswag once in a while
+    if step % 250 == 0:
+        num_correct_norm = 0
+        num_total = 0
+        for i, example in enumerate(iterate_examples("val")):
+            # only process example where i % ddp_world_size ==ddp_rank
+            if i % ddp_world_size != ddp_rank:
+                continue
+            #rendering example into tokens and labels
+            _, tokens, mask, label = render_example(example)
+            tokens = tokens.to(device)
+            mask = mask.to(device)
+            #get the logits
+            with torch.no_grad():
+                with torch.autocast(device_type=device_type):
+                    logits, loss = model(tokens)
+                pred_norm = get_most_likely_row(tokens, mask, logits)
+            num_total += 1
+            num_correct_norm += int(pred_norm == label)
+        #reduce the stats accross all process
+        if ddp:
+            num_total = torch.tensor(num_total, dtype=torch.long, device=device)
+            num_correct_norm = torch.tensor(num_correct_norm, dtype=torch.long, device=device)
+            dist.all_reduce(num_total, op=dist.ReduceOp.SUM)
+            dist.all_reduce(num_correct_norm, op=dist.ReduceOp.SUM)
+            num_total = num_total.item()
+            num_correct_norm = num_correct_norm.item()
+        acc_norm = num_correct_norm / num_total #accuracy of hellaswag
+        if master_process:
+            print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={acc_norm:.4f}")
+            with open(log_file, "a") as f:
+                f.write(f"{step} hella {acc_norm:.4f}\n")        
+
+
+    #Generate once in a while
+    if step % 250 == 0 :
         model.eval()
         num_return_sequences = 4
         max_length = 32
