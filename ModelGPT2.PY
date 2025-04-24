@@ -348,6 +348,7 @@ with open(log_file, "w") as f: # open for writing to clear the file
 
 for step in range(max_steps):
     t0 = time.time()
+    last_step = (step == max_steps - 1)
 
     #once in a while evaluate validation loss
     if step % 100 == 0:
@@ -367,6 +368,22 @@ for step in range(max_steps):
             dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
         if master_process:
             print(f"validation loss: {val_loss_accum.item():.4f}")
+            with open(log_file, "a") as f:
+                f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+            if step > 0 and (step % 50 == 0 or last_step): #save checkpoint in step numbers which is divisible by 50
+                # optionally write model checkpoints
+                checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+                checkpoint = {
+                    'model': raw_model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'step': step,
+                    'val_loss': val_loss_accum.item(),
+                    'config': raw_model.config,
+                    'torch_rng_state': torch.get_rng_state(),
+                    'cuda_rng_state': torch.cuda.get_rng_state_all(),
+                    'numpy_rng_state': np.random.get_state()
+                }
+                torch.save(checkpoint, checkpoint_path)
 
 
     #Evaluating Hellaswag once in a while
