@@ -10,6 +10,7 @@ import inspect
 import numpy as np
 import sys
 from hellaswag import render_example,iterate_examples, get_most_likely_row
+#____________________________________________________________________________
 
 
 class CasualSelfAttention(nn.Module):
@@ -22,8 +23,6 @@ class CasualSelfAttention(nn.Module):
         self.c_proj.NANOGPT_SCALE_INIT = 1
         self.n_head = config.n_head
         self.n_embd = config.n_embd
-        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
-                             .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
         B, T, C = x.size()
@@ -79,7 +78,7 @@ class Block(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024 #max sequence length
-    vocab_size: int = 50257 #number of tokens: 5000 BPE merges + 256 byte tokens +1 special token which is endoftext
+    vocab_size: int = 50257 #number of tokens: 50000 BPE merges + 256 byte tokens +1 special token which is endoftext
     n_layer: int = 12 #number of layers
     n_head: int = 12 #number of heads
     n_embd: int = 768 #embedding dimensions
@@ -99,7 +98,7 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         #Weight sharing scheme
-        self.transformer.wte.weights = self.lm_head.weight
+        self.transformer.wte.weight = self.lm_head.weight
 
         # init params
         self.apply(self._init_weights)
@@ -117,7 +116,7 @@ class GPT(nn.Module):
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
-        assert T <=self.config.block_size, f"Cannot forward sequence of length {T}"
+        assert T <=self.config.block_size, f"Cannot forward sequence of length {T} ,block size is only {self.config.block_size}"
 
         pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
         pos_emb = self.transformer.wpe(pos)
@@ -199,7 +198,7 @@ class GPT(nn.Module):
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == "cuda"    #Kernal fusion for optimizer calculations
 
-        print(f"using fused AdamW")
+        print(f"using fused AdamW: {use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9,0.95), eps=1e-8, fused=use_fused)
         return optimizer   
 
@@ -221,7 +220,7 @@ class DataLoaderLite:
         assert split in {'train', 'val'}
         
         #get the shard filenames
-        data_root = "edu_fienweb10B"
+        data_root = "edu_finenweb10B"
         shards = os.listdir(data_root)
         shards = [s for s in shards if split in s]
         shards = sorted(shards)
@@ -234,21 +233,21 @@ class DataLoaderLite:
 
     def reset(self):
     #state, init at shard 0
-        self.current_shards = 0
-        self.tokens = load_tokens(self.shards[self.current_shards])
+        self.current_shard = 0
+        self.tokens = load_tokens(self.shards[self.current_shard])
         self.current_position = self.B * self.T * self.process_rank 
 
     def next_batch(self):
         B, T = self.B, self.T
         buf = self.tokens[self.current_position:self.current_position + B*T+1]
-        x = buf[:-1].view(B,T) #input
-        y = buf[1:].view(B,T) #targets
+        x = (buf[:-1]).view(B,T) #input
+        y = (buf[1:]).view(B,T) #targets
         
         self.current_position += B * T * self.num_processes
 
         if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
-            self.current_shards = (self.current_shards + 1) % len(self.shards)
-            self.tokens = load_tokens(self.shards[self.current_shards])
+            self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = self.B * self.T * self.process_rank
         return x, y
 
@@ -284,7 +283,7 @@ else:
         device = 'cuda'
     elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         device = "mps"  #for mac users use apple silicon cpu which allready have gpu.mps is backend for apple silicon
-    print(f"Using devices: {device}")
+    print(f"Using device: {device}")
 # device = "cpu" #OVERRIDE
 
 device_type = "cuda" if device.startswith("cuda") else "cpu"
@@ -293,11 +292,11 @@ torch.manual_seed(1337)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(1337)
 
-total_batch_size = 524288 # 2**19, ~0.5M, in number of token
+total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens.Batch size in gpt2 paper = 524288
 #384/524288
 B = 16 #4/16/64 #micro batch size
 T = 1024 #32/1024 #sequence length
-assert total_batch_size % (B * T * ddp_world_size) == 0 #confirmimg total_batch_size is divicible by B * T * ddp_worldsize
+assert total_batch_size % (B * T * ddp_world_size) == 0 #confirmimg total_batch_size is divisible by B * T * ddp_worldsize
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
 if master_process:
     print(f"total desired batch size: {total_batch_size}")
@@ -309,10 +308,11 @@ val_loader = DataLoaderLite(B=B, T=T, process_rank=ddp_rank, num_processes=ddp_w
 torch.set_float32_matmul_precision('high') #set fp32 precision.Set hifh so everything will be in tensor float 32(tf32)
 
 #Create Model
-model = GPT(GPTConfig(vocab_size=58304)) #Changed vocab_size fro 50257 to 50304 for optimization and efficencysince it is a power of 2
+model = GPT(GPTConfig(vocab_size=50304)) #Changed vocab_size fro 50257 to 50304 for optimization and efficencysince it is a power of 2
 model.to(device)
-# model = torch.compile(model, backend="eager")
-model = torch.compile(model) 
+use_compile = True #ON and OFF point of torch.compile
+if use_compile:
+    model = torch.compile(model) 
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model
@@ -351,7 +351,7 @@ for step in range(max_steps):
     last_step = (step == max_steps - 1)
 
     #once in a while evaluate validation loss
-    if step % 100 == 0:
+    if step % 350 == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -370,7 +370,7 @@ for step in range(max_steps):
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step > 0 and (step % 50 == 0 or last_step): #save checkpoint in step numbers which is divisible by 50
+            if step > 0 and (step % 1050 == 0 or last_step): #save checkpoint in a while
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
@@ -378,16 +378,16 @@ for step in range(max_steps):
                     'optimizer': optimizer.state_dict(),
                     'step': step,
                     'val_loss': val_loss_accum.item(),
-                    'config': raw_model.config,
-                    'torch_rng_state': torch.get_rng_state(),
-                    'cuda_rng_state': torch.cuda.get_rng_state_all(),
-                    'numpy_rng_state': np.random.get_state()
+                    'config': raw_model.config
+                    #'torch_rng_state': torch.get_rng_state(),
+                    #'cuda_rng_state': torch.cuda.get_rng_state_all(),
+                    #'numpy_rng_state': np.random.get_state()
                 }
                 torch.save(checkpoint, checkpoint_path)
 
 
     #Evaluating Hellaswag once in a while
-    if step % 250 == 0:
+    if (step % 250 == 0 or last_step) and (not use_compile):
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
@@ -421,16 +421,16 @@ for step in range(max_steps):
 
 
     #Generate once in a while
-    if step % 250 == 0 :
+    if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile) :
         model.eval()
         num_return_sequences = 4
         max_length = 32
         enc = tiktoken.get_encoding('gpt2')
         tokens = enc.encode("Hello, I'm a language model,")
         tokens = torch.tensor(tokens, dtype=torch.long)
-        tokens = torch.unsqueeze(0).repeat(num_return_sequences, 1)
+        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
         xgen = tokens.to(device)
-        sample_rng = torch.Generator(device=device_type)
+        sample_rng = torch.Generator(device=device)
         sample_rng.manual_seed(42 + ddp_rank)
         while xgen.size(1) < max_length:
             with torch.no_grad():
@@ -476,11 +476,11 @@ for step in range(max_steps):
     optimizer.step()
     torch.cuda.synchronize() #it will make a que for next process till completing current process in gpu
     t1 = time.time()
-    dt = (t1-t0)*1000 #time difference in millisecond
+    dt = (t1-t0)*1000 #time difference in milliseconds
     tokens_processed = train_loader.B * train_loader.T * grad_accum_steps  * ddp_world_size
-    tokens_per_sec = (train_loader.B * train_loader.T) / (t1-t0)
+    tokens_per_sec = tokens_processed / dt
     if master_process:
-        print(f"step:{step:4d} | loss: {loss_accum.item()} | lr: {lr:.4e} |  norm:{norm:.4f} | dt: {dt:.2f}ms | tokens per second: {tokens_per_sec} | " )
+        print(f"step:{step:5d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e} |  norm:{norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f} | " )
 
 if ddp:
     destroy_process_group()

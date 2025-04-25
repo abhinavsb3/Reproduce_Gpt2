@@ -146,12 +146,12 @@ def evaluate(model_type, device):
 
 
 def get_most_likely_row(tokens, mask, logits):
-        shift_logits = (logits[..., :-1, :]).contiguos() #this will be x for loss calculation
-        shift_tokens = (tokens[..., 1:]).contiguos() #this will be y for loss calculation
-        shift_mask = (mask[..., 1:]).contiguos() #shifting same as tokens shifted
+        shift_logits = (logits[..., :-1, :]).contiguous() #this will be x for loss calculation
+        shift_tokens = (tokens[..., 1:]).contiguous() #this will be y for loss calculation
+        shift_mask = (mask[..., 1:]).contiguous() #shifting same as tokens shifted
         flat_shift_logits = shift_logits.view(-1, shift_logits.size(-1))
         flat_shift_tokens = shift_tokens.view(-1)
-        shift_losses = F.cross_entropy(flat_shift_logits, flat_shift_tokens, reduce='none')
+        shift_losses = F.cross_entropy(flat_shift_logits, flat_shift_tokens, reduction='none')
         shift_losses = shift_losses.view(tokens.size(0), -1)
         masked_shift_losses = shift_losses * shift_mask
         sum_loss = masked_shift_losses.sum(dim=1)

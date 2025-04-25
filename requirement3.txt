@@ -4,4 +4,7 @@ tokenizers==0.21.1
 torch==2.6.0+cu124
 torchaudio==2.6.0+cu124
 torchvision==0.21.0+cu124
+transformers==4.50.1
 tqdm==4.67.1
+requests==2.32.3
+numpy==2.2.4
