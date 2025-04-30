@@ -294,7 +294,7 @@ if torch.cuda.is_available():
 
 total_batch_size = 524288 # 2**19, ~0.5M, in number of tokens.Batch size in gpt2 paper = 524288
 #384/524288
-B = 16 #4/16/64 #micro batch size
+B = 64 #4/16/64 #micro batch size
 T = 1024 #32/1024 #sequence length
 assert total_batch_size % (B * T * ddp_world_size) == 0 #confirmimg total_batch_size is divisible by B * T * ddp_worldsize
 grad_accum_steps = total_batch_size // (B * T * ddp_world_size)
@@ -381,19 +381,20 @@ for step in range(max_steps):
                     'config': raw_model.config
                     #'torch_rng_state': torch.get_rng_state(),
                     #'cuda_rng_state': torch.cuda.get_rng_state_all(),
-                    #'numpy_rng_state': np.random.get_state()
+                    #'numpy_rng_state': np.random.get_state()                   
                 }
                 torch.save(checkpoint, checkpoint_path)
 
 
     #Evaluating Hellaswag once in a while
-    if (step % 250 == 0 or last_step) and (not use_compile):
+    if (step % 250 == 0 or last_step) and (not use_compile): 
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
-            # only process example where i % ddp_world_size ==ddp_rank
-            if i % ddp_world_size != ddp_rank:
-                continue
+            # only process example where i % ddp_world_size ==ddp_rank#this is for proper managemnt of which part is deal by which gpu
+            if ddp:
+                if i % ddp_world_size != ddp_rank:
+                    continue
             #rendering example into tokens and labels
             _, tokens, mask, label = render_example(example)
             tokens = tokens.to(device)

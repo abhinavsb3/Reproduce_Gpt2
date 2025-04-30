@@ -22,8 +22,8 @@ def download_file(url:str, fname:str, chunk_size=1024):
         desc = fname,
         total=total,
         unit="iB",
-        unit_divisor=True,
-        unit_devisor=1024
+        unit_scale=True,
+        unit_divisor=1024
     )as bar:
         for data in resp.iter_content(chunk_size=chunk_size):
             size = file.write(data)
