@@ -191,14 +191,14 @@ class GPT(nn.Module):
                        ]
         num_decay_params = sum(p.numel() for p in decay_params)  
         num_nodecay_params = sum(p.numel() for p in nodecay_params) 
-        
-        print(f"num decayed parameters tensors: {len(decay_params)}, with{num_decay_params}:parameters")
-        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        if master_process:
+            print(f"num decayed parameters tensors: {len(decay_params)}, with{num_decay_params}:parameters")
+            print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
         # Create AdamW optimizer and use the fused version if it is available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == "cuda"    #Kernal fusion for optimizer calculations
-
-        print(f"using fused AdamW: {use_fused}")
+        if master_process:
+            print(f"using fused AdamW: {use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9,0.95), eps=1e-8, fused=use_fused)
         return optimizer   
 
@@ -248,7 +248,7 @@ class DataLoaderLite:
         if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
             self.current_shard = (self.current_shard + 1) % len(self.shards)
             self.tokens = load_tokens(self.shards[self.current_shard])
-            self.current_position = self.B * self.T * self.process_rank
+            self.current_position = B * T * self.process_rank
         return x, y
 
 
@@ -370,7 +370,7 @@ for step in range(max_steps):
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step > 0 and (step % 1050 == 0 or last_step): #save checkpoint in a while
+            if step > 0 or last_step: #save checkpoint in a every validation
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
@@ -401,7 +401,7 @@ for step in range(max_steps):
             mask = mask.to(device)
             #get the logits
             with torch.no_grad():
-                with torch.autocast(device_type=device_type):
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     logits, loss = model(tokens)
                 pred_norm = get_most_likely_row(tokens, mask, logits)
             num_total += 1
@@ -456,14 +456,14 @@ for step in range(max_steps):
     for micro_step in range(grad_accum_steps):
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
+        if ddp:
+            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) #this line will mkae ddp to synchronize gpus only for last loop microstep and sync off in all other steps
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16): #using mixed precision
             logits, loss = model(x, y)
         #Watch video for understand need of scalling in loss calculated below
         loss = loss / grad_accum_steps #loss scaling.otherwise weight gradient wont we same as normal loss without microstep.reason explained in video
         loss_accum += loss.detach() #used detach for not include this in computational graph
                                     #since loss is scaled loss which is divided by grad_accum_step it will be a small value so the cummulated loss will be real loss to print.
-        if ddp:
-            model.require_backward_grad_sync = (micro_step == grad_accum_steps - 1) #this line will mkae ddp to synchronize gpus only for last loop microstep and sync off in all other steps
         loss.backward()
     
     if ddp:
@@ -475,14 +475,16 @@ for step in range(max_steps):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     optimizer.step()
-    torch.cuda.synchronize() #it will make a que for next process till completing current process in gpu
+    if device_type == 'cuda':
+        torch.cuda.synchronize() #it will make a que for next process till completing current process in gpu
     t1 = time.time()
-    dt = (t1-t0)*1000 #time difference in milliseconds
+    dt = (t1-t0)*1000 #time difference in milliseconds#remove *1000 for time in seconds
     tokens_processed = train_loader.B * train_loader.T * grad_accum_steps  * ddp_world_size
     tokens_per_sec = tokens_processed / dt
     if master_process:
         print(f"step:{step:5d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e} |  norm:{norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f} | " )
-
+        with open(log_file, 'a') as f:
+            f.write(f"{step} train {loss_accum.item():.6f}\n")
 if ddp:
     destroy_process_group()
-sys.exit(0)
+#sys.exit(0)
